@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SVG Generative Lines</title>
+    <style>
+      html, body { height: 100%; margin: 0; background:#242424; }
+      #stage { display:block; width:100vw; height:100vh; }
+      line { stroke: white; stroke-opacity: 0.9; vector-effect: non-scaling-stroke; }
+    </style>
+  </head>
+  <body>
+    <svg id="stage" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+
+    <script>
+      // ====== パラメータ ======
+      const NUM_VERTICES = 4;           // 初期多角形の頂点数（偶数推奨）
+      const RADIUS       = 800;         // 半径（viewBox 内の座標系で使用）
+      const ADD_LINE_INTERVAL = 0.05;   // 1本追加の間隔（秒）
+
+      // ====== 型イメージ ======
+      // Vertex: { x:number, y:number }
+      // Edge:   [aIndex:number, bIndex:number]  // currentVertices のローカルインデックス
+
+      // ====== 状態 ======
+      const svg = document.getElementById('stage');
+      const gRoot = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      svg.appendChild(gRoot);
+
+      let viewSize = 1400;        // 正方 viewBox の一辺（pxではなく座標単位）
+      let CENTER = { x: viewSize/2, y: viewSize/2 };
+
+      let currentVertices = /** @type {{x:number,y:number}[]} */ ([]);
+      let currentEdges    = /** @type {Array<[number,number]>} */ ([]);
+      const pendingEdges  = /** @type {Array<[number,number]>} */ ([]);
+
+      let generation = 0;
+      let lastAddTime = performance.now();
+
+      // ====== ユーティリティ ======
+      function setViewBox() {
+        // ウィンドウの短辺に合わせて正方形 viewBox を取る
+        const minSide = Math.min(window.innerWidth, window.innerHeight);
+        // スケール変動にも破綻しないよう、内部座標は固定サイズで持つ
+        viewSize = 2 * (RADIUS + 200);   // 半径に余白を足したくらいのサイズ
+        CENTER = { x: viewSize/2, y: viewSize/2 };
+
+        svg.setAttribute('viewBox', `0 0 ${viewSize} ${viewSize}`);
+        // 見た目の線幅が画面解像度で細くなりすぎないよう、stroke-width を調整
+        const strokeWidth = Math.max(1, Math.round(minSide / 700));
+        gRoot.style.strokeWidth = strokeWidth / 2;  
+      }
+
+      function getVertexOnCircle(center, radius, angle) {
+        return { x: center.x + radius * Math.cos(angle),
+                y: center.y + radius * Math.sin(angle) };
+      }
+
+      function rotateVertex(v, center, angle) {
+        const dx = v.x - center.x, dy = v.y - center.y;
+        const cosA = Math.cos(angle), sinA = Math.sin(angle);
+        return {
+          x: center.x + dx * cosA - dy * sinA,
+          y: center.y + dx * sinA + dy * cosA,
+        };
+      }
+
+      function createInitialShape() {
+        const vertices = [];
+        const edges = [];
+        for (let i = 0; i < NUM_VERTICES; i++) {
+          const angle = (2 * Math.PI * i) / NUM_VERTICES;
+          vertices.push(getVertexOnCircle(CENTER, RADIUS, angle));
+          edges.push([i, (i + 1) % NUM_VERTICES]); // 外周
+        }
+        // 対角線（偶数前提）
+        for (let i = 0; i < NUM_VERTICES / 2; i++) {
+          edges.push([i, i + NUM_VERTICES / 2]);
+        }
+        return { vertices, edges };
+      }
+
+      function prepareNextGeneration(offsetAngle) {
+        const rotatedVertices = currentVertices.map(v => rotateVertex(v, CENTER, offsetAngle));
+        const vertexOffset = currentVertices.length;
+
+        // 新頂点を全体リストに追加
+        currentVertices.push(...rotatedVertices);
+
+        // 旧辺のコピー（新頂点側へインデックスをシフト）
+        const rotatedEdges = currentEdges.map(([a,b]) => [a + vertexOffset, b + vertexOffset]);
+
+        // 旧↔新の全結合（完全二部グラフ）
+        const crossEdges = [];
+        for (let oldIdx = 0; oldIdx < vertexOffset; oldIdx++) {
+          for (let k = 0; k < rotatedVertices.length; k++) {
+            crossEdges.push([oldIdx, vertexOffset + k]);
+          }
+        }
+
+        // 1本ずつ取り出して描画するためのキューに積む
+        pendingEdges.push(...rotatedEdges, ...crossEdges);
+      }
+
+      function drawLineByIndices(aIndex, bIndex) {
+        const va = currentVertices[aIndex];
+        const vb = currentVertices[bIndex];
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', va.x);
+        line.setAttribute('y1', va.y);
+        line.setAttribute('x2', vb.x);
+        line.setAttribute('y2', vb.y);
+        gRoot.appendChild(line);
+      }
+
+      function drawAllCurrentEdgesFromScratch() {
+        // （リサイズ時など）全削除→再描画
+        while (gRoot.firstChild) gRoot.removeChild(gRoot.firstChild);
+        for (const [a,b] of currentEdges) drawLineByIndices(a,b);
+      }
+
+      // ====== メインループ ======
+      function tick(now) {
+        // 一定間隔で1本だけ追加
+        if ((now - lastAddTime) / 1000 > ADD_LINE_INTERVAL) {
+          if (pendingEdges.length > 0) {
+            const [a,b] = pendingEdges.shift();
+            currentEdges.push([a,b]);
+            drawLineByIndices(a,b); // 既存は消さずに1本だけ追加
+          } else {
+            // 次世代の準備 → キューに積む
+            generation++;
+            const offsetAngle = Math.PI / (NUM_VERTICES * Math.pow(2, Math.max(0, generation - 2)));
+            prepareNextGeneration(offsetAngle);
+          }
+          lastAddTime = now;
+        }
+        requestAnimationFrame(tick);
+      }
+
+      // ====== 初期化 ======
+      function setup() {
+        setViewBox();
+        generation = 1;
+        const initial = createInitialShape();
+        currentVertices = [...initial.vertices];
+        currentEdges    = [...initial.edges];
+        drawAllCurrentEdgesFromScratch();
+        lastAddTime = performance.now();
+        requestAnimationFrame(tick);
+      }
+
+      window.addEventListener('resize', () => {
+        setViewBox();
+        drawAllCurrentEdgesFromScratch(); // 座標系の見え方が変わるので再描画
+      });
+
+      setup();
+    </script>
+  </body>
+</html>

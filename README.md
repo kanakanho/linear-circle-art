@@ -1,3 +1,5 @@
+# Linear Circle Art
+
 ## 1. 基本ルール
 
 ### `NUM_VERTICES`
